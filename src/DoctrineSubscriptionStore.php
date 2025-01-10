@@ -8,11 +8,14 @@ use DateTimeImmutable;
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
 use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\Schema;
+use Doctrine\DBAL\Schema\SchemaDiff;
+use Doctrine\DBAL\Schema\SchemaException;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
@@ -39,7 +42,9 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     public function setup(): void
     {
         try {
-            foreach ($this->determineRequiredSqlStatements() as $statement) {
+            $schemaManager = $this->dbal->createSchemaManager();
+            $schemaDiff = $schemaManager->createComparator()->compareSchemas($schemaManager->introspectSchema(), $this->databaseSchema());
+            foreach (self::toSaveSql($this->dbal->getDatabasePlatform(), $schemaDiff) as $statement) {
                 $this->dbal->executeStatement($statement);
             }
         } catch (DbalException $e) {
@@ -159,15 +164,10 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     }
 
     /**
-     * @return array<string>
-     * @throws DbalException
+     * @throws SchemaException
      */
-    private function determineRequiredSqlStatements(): array
+    private function databaseSchema(): Schema
     {
-        $schemaConfig = $this->dbal->createSchemaManager()->createSchemaConfig();
-        $schemaConfig->setDefaultTableOptions([
-            'charset' => 'utf8mb4'
-        ]);
         $tableSchema = new Table($this->tableName, [
             (new Column('id', Type::getType(Types::STRING)))->setNotnull(true)->setLength(SubscriptionId::MAX_LENGTH),
             (new Column('position', Type::getType(Types::INTEGER)))->setNotnull(true),
@@ -179,15 +179,39 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         ]);
         $tableSchema->setPrimaryKey(['id']);
         $tableSchema->addIndex(['status']);
+        $schemaConfig = $this->dbal->createSchemaManager()->createSchemaConfig();
+        $schemaConfig->setDefaultTableOptions([
+            'charset' => 'utf8mb4'
+        ]);
+        return new Schema([$tableSchema], [], $schemaConfig);
+    }
 
-        $schemaManager = $this->dbal->createSchemaManager();
-        $platform = $this->dbal->getDatabasePlatform();
-        if (!$schemaManager->tablesExist([$this->tableName])) {
-            return $platform->getCreateTableSQL($tableSchema);
+    /**
+     * @return array<string>
+     * @throws DbalException
+     */
+    private static function toSaveSql(AbstractPlatform $platform, SchemaDiff $schemaDiff): array
+    {
+        $sql = [];
+        if ($platform->supportsSchemas()) {
+            foreach ($schemaDiff->getCreatedSchemas() as $schema) {
+                $sql[] = $platform->getCreateSchemaSQL($schema);
+            }
         }
-        $fromSchema = new Schema([$schemaManager->introspectTable($this->tableName)], [], $schemaConfig);
-        $toSchema = new Schema([$tableSchema], [], $schemaConfig);
-        $schemaDiff = (new Comparator($platform))->compareSchemas($fromSchema, $toSchema);
-        return $platform->getAlterSchemaSQL($schemaDiff);
+        if ($platform->supportsSequences() === true) {
+            foreach ($schemaDiff->getAlteredSequences() as $sequence) {
+                $sql[] = $platform->getAlterSequenceSQL($sequence);
+            }
+            foreach ($schemaDiff->getCreatedSequences() as $sequence) {
+                $sql[] = $platform->getCreateSequenceSQL($sequence);
+            }
+        }
+        $sql = array_merge($sql, $platform->getCreateTablesSQL($schemaDiff->getCreatedTables()));
+        foreach ($schemaDiff->getAlteredTables() as $tableDiff) {
+            foreach ($platform->getAlterTableSQL($tableDiff) as $statement) {
+                $sql[] = $statement;
+            }
+        }
+        return $sql;
     }
 }
