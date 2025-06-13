@@ -10,9 +10,7 @@ use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
-use Doctrine\DBAL\Result;
 use Doctrine\DBAL\Schema\Column;
-use Doctrine\DBAL\Schema\Comparator;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\SchemaDiff;
 use Doctrine\DBAL\Schema\SchemaException;
@@ -24,6 +22,7 @@ use RuntimeException;
 use Wwwision\SubscriptionEngine\Store\SubscriptionCriteria;
 use Wwwision\SubscriptionEngine\Store\SubscriptionStore;
 use Wwwision\SubscriptionEngine\Subscription\Position;
+use Wwwision\SubscriptionEngine\Subscription\RunMode;
 use Wwwision\SubscriptionEngine\Subscription\Subscription;
 use Wwwision\SubscriptionEngine\Subscription\SubscriptionError;
 use Wwwision\SubscriptionEngine\Subscription\SubscriptionId;
@@ -32,11 +31,19 @@ use Wwwision\SubscriptionEngine\Subscription\SubscriptionStatus;
 
 final class DoctrineSubscriptionStore implements SubscriptionStore
 {
+    private readonly ClockInterface $clock;
+
     public function __construct(
-        private string $tableName,
+        private readonly string $tableName,
         private readonly Connection $dbal,
-        private readonly ClockInterface $clock,
+        ClockInterface|null $clock = null,
     ) {
+        $this->clock = $clock ?? new class implements ClockInterface {
+            public function now(): DateTimeImmutable
+            {
+                return new DateTimeImmutable();
+            }
+        };
     }
 
     public function setup(): void
@@ -69,7 +76,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
                     ArrayParameterType::STRING,
                 );
         }
-        if (!$criteria->status->isEmpty()) {
+        if ($criteria->status !== null) {
             $queryBuilder->andWhere('status IN (:status)')
                 ->setParameter(
                     'status',
@@ -110,12 +117,20 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 
     public function beginTransaction(): void
     {
-        $this->dbal->beginTransaction();
+        if ($this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+            $this->dbal->executeStatement('BEGIN EXCLUSIVE');
+        } else {
+            $this->dbal->beginTransaction();
+        }
     }
 
     public function commit(): void
     {
-        $this->dbal->commit();
+        if ($this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+            $this->dbal->executeStatement('COMMIT');
+        } else {
+            $this->dbal->commit();
+        }
     }
 
     /**
@@ -125,6 +140,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     {
         return [
             'status' => $subscription->status->value,
+            'run_mode' => $subscription->runMode->value,
             'position' => $subscription->position->value,
             'error_message' => $subscription->error?->errorMessage,
             'error_previous_status' => $subscription->error?->previousStatus?->value,
@@ -138,6 +154,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     private static function fromDatabase(array $row): Subscription
     {
         assert(is_string($row['id']));
+        assert(is_string($row['run_mode']));
         assert(is_string($row['status']));
         assert(is_int($row['position']));
         assert(is_string($row['last_saved_at']));
@@ -156,6 +173,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 
         return new Subscription(
             SubscriptionId::fromString($row['id']),
+            RunMode::from($row['run_mode']),
             SubscriptionStatus::from($row['status']),
             Position::fromInteger($row['position']),
             $subscriptionError,
@@ -170,8 +188,9 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     {
         $tableSchema = new Table($this->tableName, [
             (new Column('id', Type::getType(Types::STRING)))->setNotnull(true)->setLength(SubscriptionId::MAX_LENGTH),
-            (new Column('position', Type::getType(Types::INTEGER)))->setNotnull(true),
+            (new Column('run_mode', Type::getType(Types::STRING)))->setNotnull(true)->setLength(32),
             (new Column('status', Type::getType(Types::STRING)))->setNotnull(true)->setLength(32),
+            (new Column('position', Type::getType(Types::INTEGER)))->setNotnull(true),
             (new Column('error_message', Type::getType(Types::TEXT)))->setNotnull(false),
             (new Column('error_previous_status', Type::getType(Types::STRING)))->setNotnull(false)->setLength(32),
             (new Column('error_trace', Type::getType(Types::TEXT)))->setNotnull(false),
