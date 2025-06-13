@@ -34,8 +34,8 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     private readonly ClockInterface $clock;
 
     public function __construct(
-        private readonly string $tableName,
         private readonly Connection $dbal,
+        private readonly string $tableName,
         ClockInterface|null $clock = null,
     ) {
         $this->clock = $clock ?? new class implements ClockInterface {
