@@ -188,7 +188,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     {
         $tableSchema = new Table($this->tableName, [
             (new Column('id', Type::getType(Types::STRING)))->setNotnull(true)->setLength(SubscriptionId::MAX_LENGTH),
-            (new Column('run_mode', Type::getType(Types::STRING)))->setNotnull(true)->setLength(32),
+            (new Column('run_mode', Type::getType(Types::STRING)))->setNotnull(true)->setDefault(RunMode::FROM_BEGINNING->value)->setLength(32),
             (new Column('status', Type::getType(Types::STRING)))->setNotnull(true)->setLength(32),
             (new Column('position', Type::getType(Types::INTEGER)))->setNotnull(true),
             (new Column('error_message', Type::getType(Types::TEXT)))->setNotnull(false),
