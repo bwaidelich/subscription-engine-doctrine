@@ -21,7 +21,7 @@
     ],
     "require": {
         "php": ">=8.3",
-        "wwwision/subscription-engine": "~1.2.1",
+        "wwwision/subscription-engine": "^1",
         "psr/clock": "^1",
         "doctrine/dbal": "^3 || ^4"
     },
