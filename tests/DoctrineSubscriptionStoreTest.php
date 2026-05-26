@@ -212,6 +212,75 @@ final class DoctrineSubscriptionStoreTest extends TestCase
     }
 
     #[Test]
+    public function findByCriteriaReturnsNoneWhenStoreIsEmpty(): void
+    {
+        $this->store->setup();
+
+        self::assertSameSubscriptionIds([], $this->store->findByCriteria(SubscriptionCriteria::noConstraints()));
+    }
+
+    #[Test]
+    public function findByCriteriaReturnsSubscriptionsOrderedById(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('charlie', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('alpha', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('bravo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+
+        self::assertSameSubscriptionIds(['alpha', 'bravo', 'charlie'], $this->store->findByCriteria(SubscriptionCriteria::noConstraints()));
+    }
+
+    #[Test]
+    public function findByCriteriaFiltersByIds(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('bar', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('baz', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+
+        $result = $this->store->findByCriteria(SubscriptionCriteria::create(ids: ['foo', 'baz']));
+        self::assertSameSubscriptionIds(['baz', 'foo'], $result);
+    }
+
+    #[Test]
+    public function findByCriteriaFiltersByStatus(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('active-1', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('booting-1', RunMode::FROM_BEGINNING, SubscriptionStatus::BOOTING));
+        $this->store->add(Subscription::create('active-2', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+
+        $result = $this->store->findByCriteria(SubscriptionCriteria::create(status: [SubscriptionStatus::ACTIVE]));
+        self::assertSameSubscriptionIds(['active-1', 'active-2'], $result);
+    }
+
+    #[Test]
+    public function findByCriteriaCombinesIdAndStatusConstraints(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('bar', RunMode::FROM_BEGINNING, SubscriptionStatus::BOOTING));
+        $this->store->add(Subscription::create('baz', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+
+        $result = $this->store->findByCriteria(SubscriptionCriteria::create(ids: ['foo', 'bar'], status: [SubscriptionStatus::ACTIVE]));
+        self::assertSameSubscriptionIds(['foo'], $result);
+    }
+
+    #[Test]
+    public function findByCriteriaAndFindByCriteriaForUpdateReturnTheSameResult(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->add(Subscription::create('bar', RunMode::FROM_BEGINNING, SubscriptionStatus::BOOTING));
+
+        $criteria = SubscriptionCriteria::create(status: [SubscriptionStatus::BOOTING]);
+        self::assertSameSubscriptionIds(
+            $this->store->findByCriteriaForUpdate($criteria)->map(static fn(Subscription $s): string => $s->id->value),
+            $this->store->findByCriteria($criteria),
+        );
+    }
+
+    #[Test]
     public function transactionCommitPersistsChanges(): void
     {
         $this->store->setup();

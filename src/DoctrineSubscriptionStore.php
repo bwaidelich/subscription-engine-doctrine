@@ -59,13 +59,23 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         }
     }
 
+    public function findByCriteria(SubscriptionCriteria $criteria): Subscriptions
+    {
+        return $this->fetchByCriteria($criteria, false);
+    }
+
     public function findByCriteriaForUpdate(SubscriptionCriteria $criteria): Subscriptions
+    {
+        return $this->fetchByCriteria($criteria, true);
+    }
+
+    private function fetchByCriteria(SubscriptionCriteria $criteria, bool $forUpdate): Subscriptions
     {
         $queryBuilder = $this->dbal->createQueryBuilder()
             ->select('*')
             ->from($this->tableName)
             ->orderBy('id');
-        if (!$this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+        if ($forUpdate && !$this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
             $queryBuilder->forUpdate();
         }
         if ($criteria->ids !== null) {
