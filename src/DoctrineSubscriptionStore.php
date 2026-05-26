@@ -111,7 +111,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
             $row,
             [
                 'id' => $subscription->id->value,
-            ]
+            ],
         );
     }
 
@@ -200,7 +200,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         $tableSchema->addIndex(['status']);
         $schemaConfig = $this->dbal->createSchemaManager()->createSchemaConfig();
         $schemaConfig->setDefaultTableOptions([
-            'charset' => 'utf8mb4'
+            'charset' => 'utf8mb4',
         ]);
         return new Schema([$tableSchema], [], $schemaConfig);
     }
