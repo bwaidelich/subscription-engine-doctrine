@@ -21,7 +21,7 @@
     ],
     "require": {
         "php": ">=8.3",
-        "wwwision/subscription-engine": "@dev",
+        "wwwision/subscription-engine": "~1.2.1",
         "psr/clock": "^1",
         "doctrine/dbal": "^3 || ^4"
     },
@@ -45,9 +45,11 @@
         "test:phpstan": "phpstan",
         "test:cs": "phpcs --colors src",
         "test:cs:fix": "phpcbf --colors src",
+        "test:phpunit": "phpunit",
         "test": [
             "@test:phpstan",
-            "@test:cs"
+            "@test:cs",
+            "@test:phpunit"
         ]
     }
 }
