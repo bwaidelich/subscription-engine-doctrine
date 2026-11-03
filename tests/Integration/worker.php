@@ -111,6 +111,10 @@ foreach ($config['subscriptions'] as $id) {
         if (($config['poison']['subscription'] ?? null) === $id && $config['poison']['position'] === $event->position->value) {
             throw new RuntimeException('poison');
         }
+        $previousPosition = (int) $connection->fetchOne('SELECT MAX(position) FROM projection WHERE subscription = ?', [$id]);
+        if ($previousPosition !== $event->position->value - 1) {
+            $write(['outOfOrder' => sprintf('%s handled event %d after event %d', $id, $event->position->value, $previousPosition)]);
+        }
         $connection->insert('projection', ['subscription' => $id, 'position' => $event->position->value, 'worker' => $config['name']]);
         usleep($config['sleepUs'] ?? 0);
     });
@@ -140,9 +144,15 @@ $engine->onEngineEvent(static function (EngineEvent $event) use (&$run, &$failur
     }
 });
 
-$catchUp = static fn(string $mode) => $mode === 'boot'
-    ? $engine->boot(isset($config['ids']) ? SubscriptionEngineCriteria::create($config['ids']) : null, $config['limit'])
-    : $engine->catchUpActive(isset($config['ids']) ? SubscriptionEngineCriteria::create($config['ids']) : null, $config['limit']);
+$catchUp = static function (string $mode) use ($engine, $config) {
+    $criteria = isset($config['ids']) ? SubscriptionEngineCriteria::create($config['ids']) : null;
+    return match ($mode) {
+        'boot' => $engine->boot($criteria, $config['limit']),
+        'bootNext' => $engine->bootNext($criteria, $config['limit']),
+        'activeNext' => $engine->catchUpNextActive($criteria, $config['limit']),
+        default => $engine->catchUpActive($criteria, $config['limit']),
+    };
+};
 
 if ($config['mode'] === 'keepGoing') {
     // a long-running worker: log every exception and carry on with the same engine and connection

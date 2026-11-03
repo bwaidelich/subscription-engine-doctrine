@@ -153,6 +153,10 @@ jobs:
           - database: 'mysql'
             start: 'docker run -d -e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=test -p 127.0.0.1:3306:3306 mysql:8.4'
             dsn: 'pdo-mysql://root:test@127.0.0.1:3306/test'
+          - database: 'mysql-lowest'
+            start: 'docker run -d -e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=test -p 127.0.0.1:3306:3306 mysql:8.4'
+            dsn: 'pdo-mysql://root:test@127.0.0.1:3306/test'
+            composer-flags: '--prefer-lowest'
           - database: 'mariadb'
             start: 'docker run -d -e MARIADB_ROOT_PASSWORD=test -e MARIADB_DATABASE=test -p 127.0.0.1:3306:3306 mariadb:11.4'
             dsn: 'pdo-mysql://root:test@127.0.0.1:3306/test'
@@ -177,8 +181,8 @@ jobs:
       - name: Require subscription engine 2.x
         run: composer require --no-update wwwision/subscription-engine:2.x-dev
 
-      - name: Install highest dependencies
-        run: composer update --prefer-dist --no-progress
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-progress ${{ matrix.composer-flags }}
 
       - name: Run tests
         run: composer run-script test:phpunit

@@ -10,6 +10,14 @@ Subscriber handlers that share the connection run in the same transaction.
 
 MySQL and MariaDB roll back the whole transaction of a deadlock victim. If that happens inside a subscriber handler, `add()` and `update()` throw an exception instead of writing outside of the transaction, and the engine repeats the batch on the next catch-up. This relies on `PDO::inTransaction()`, so it requires a PDO driver: With `mysqli` it is not detected.
 
+## Claims
+
+`claimNext()` requires MySQL 8.0, MariaDB 10.6 or PostgreSQL. On older versions of MySQL and MariaDB, DBAL throws a `NotSupported` exception instead of silently waiting for locks. `catchUpActive()` and `boot()` keep working.
+
+- It reads the candidates without locks and then locks them one by one, because a single query with `ORDER BY` and `LIMIT` locks all matching rows on MySQL and MariaDB. This takes one query for the candidates and one per candidate it tries
+- SQLite has no row locks. `beginTransaction()` already makes a second worker wait until the first one is done, so workers run one after another. Each event is still handled once, and `allSubscriptionsLocked` is never reported
+- MySQL considers `SKIP LOCKED` unsafe for statement-based replication
+
 ## Tests
 
 `composer test` skips the tests in `tests/Integration` unless `TEST_DATABASE_DSN` is set. They run worker processes against a real database and drop and create the tables `events`, `subscriptions`, `projection`, `contention` and `filler`, so use a dedicated database:
