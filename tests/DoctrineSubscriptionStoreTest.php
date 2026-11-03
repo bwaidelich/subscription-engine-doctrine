@@ -281,6 +281,34 @@ final class DoctrineSubscriptionStoreTest extends TestCase
     }
 
     #[Test]
+    public function rollbackDiscardsChangesOfTheTransaction(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('kept', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+
+        $this->store->beginTransaction();
+        $this->store->add(Subscription::create('discarded', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->rollback();
+
+        $subscriptions = $this->store->findByCriteria(SubscriptionCriteria::noConstraints());
+        self::assertSame(['kept'], $subscriptions->getIds()->toStringArray());
+    }
+
+    #[Test]
+    public function aNewTransactionCanBeStartedAfterARollback(): void
+    {
+        $this->store->setup();
+        $this->store->beginTransaction();
+        $this->store->rollback();
+
+        $this->store->beginTransaction();
+        $this->store->add(Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+        $this->store->commit();
+
+        self::assertCount(1, $this->store->findByCriteria(SubscriptionCriteria::noConstraints()));
+    }
+
+    #[Test]
     public function transactionCommitPersistsChanges(): void
     {
         $this->store->setup();
