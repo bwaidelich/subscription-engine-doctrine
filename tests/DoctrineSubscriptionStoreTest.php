@@ -9,6 +9,7 @@ use Doctrine\DBAL\Configuration;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\DriverManager;
 use Doctrine\DBAL\Schema\DefaultSchemaManagerFactory;
+use PDO;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
@@ -281,6 +282,42 @@ final class DoctrineSubscriptionStoreTest extends TestCase
     }
 
     #[Test]
+    public function updateFailsIfTheDatabaseEndedTheTransaction(): void
+    {
+        $this->store->setup();
+        $subscription = Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE);
+        $this->store->add($subscription);
+        $this->connection->beginTransaction();
+        $this->endTransactionInDatabase();
+
+        try {
+            $this->store->update($subscription->with(position: Position::fromInteger(5)));
+            self::fail('Expected exception');
+        } catch (RuntimeException $e) {
+            self::assertSame(1793750401, $e->getCode());
+        }
+
+        self::assertSame(0, $this->store->findByCriteria(SubscriptionCriteria::noConstraints())->get($subscription->id)->position->value);
+    }
+
+    #[Test]
+    public function addFailsIfTheDatabaseEndedTheTransaction(): void
+    {
+        $this->store->setup();
+        $this->connection->beginTransaction();
+        $this->endTransactionInDatabase();
+
+        try {
+            $this->store->add(Subscription::create('foo', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE));
+            self::fail('Expected exception');
+        } catch (RuntimeException $e) {
+            self::assertSame(1793750401, $e->getCode());
+        }
+
+        self::assertCount(0, $this->store->findByCriteria(SubscriptionCriteria::noConstraints()));
+    }
+
+    #[Test]
     public function transactionCommitPersistsChanges(): void
     {
         $this->store->setup();
@@ -290,6 +327,16 @@ final class DoctrineSubscriptionStoreTest extends TestCase
         $this->store->commit();
 
         self::assertSameSubscriptionIds(['foo'], $this->store->findByCriteriaForUpdate(SubscriptionCriteria::noConstraints()));
+    }
+
+    /**
+     * What a database does with its deadlock victim: The transaction is gone, but DBAL does not know about it
+     */
+    private function endTransactionInDatabase(): void
+    {
+        $native = $this->connection->getNativeConnection();
+        self::assertInstanceOf(PDO::class, $native);
+        $native->rollBack();
     }
 
     /**

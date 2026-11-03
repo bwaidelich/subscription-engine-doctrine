@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
 use Doctrine\DBAL\Schema\Column;
@@ -17,6 +18,7 @@ use Doctrine\DBAL\Schema\SchemaException;
 use Doctrine\DBAL\Schema\Table;
 use Doctrine\DBAL\Types\Type;
 use Doctrine\DBAL\Types\Types;
+use PDO;
 use Psr\Clock\ClockInterface;
 use RuntimeException;
 use Wwwision\SubscriptionEngine\Store\SubscriptionCriteria;
@@ -103,6 +105,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 
     public function add(Subscription $subscription): void
     {
+        $this->assertTransactionIsIntact();
         $row = self::toDatabase($subscription);
         $row['id'] = $subscription->id->value;
         $row['last_saved_at'] = $this->clock->now()->format('Y-m-d H:i:s');
@@ -114,6 +117,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 
     public function update(Subscription $subscription): void
     {
+        $this->assertTransactionIsIntact();
         $row = self::toDatabase($subscription);
         $row['last_saved_at'] = $this->clock->now()->format('Y-m-d H:i:s');
         $this->dbal->update(
@@ -123,6 +127,25 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
                 'id' => $subscription->id->value,
             ],
         );
+    }
+
+    /**
+     * MySQL and MariaDB roll back the whole transaction of a deadlock victim, without DBAL knowing about it.
+     * Everything written after that would be committed right away, so a position could be persisted without the events it stands for.
+     */
+    private function assertTransactionIsIntact(): void
+    {
+        if (!$this->dbal->isTransactionActive()) {
+            return;
+        }
+        if ($this->dbal->getDatabasePlatform() instanceof AbstractMySQLPlatform) {
+            // The response to the failed statement does not contain the status of the transaction, so PDO would still report the transaction as active
+            $this->dbal->fetchOne('SELECT 1');
+        }
+        $nativeConnection = $this->dbal->getNativeConnection();
+        if ($nativeConnection instanceof PDO && !$nativeConnection->inTransaction()) {
+            throw new RuntimeException('The database has ended the transaction of the subscription store, probably because of a deadlock. All changes of this catch-up have been discarded', 1793750401);
+        }
     }
 
     public function beginTransaction(): void
