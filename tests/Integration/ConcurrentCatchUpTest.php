@@ -13,6 +13,7 @@ use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Schema\DefaultSchemaManagerFactory;
 use Doctrine\DBAL\Tools\DsnParser;
 use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Test;
 use PHPUnit\Framework\TestCase;
 use Throwable;
@@ -43,7 +44,7 @@ final class ConcurrentCatchUpTest extends TestCase
             self::markTestSkipped('TEST_DATABASE_DSN is not set');
         }
         $this->connection = self::connect($dsn);
-        foreach (['events', 'subscriptions', 'projection'] as $table) {
+        foreach (['events', 'subscriptions', 'projection', 'contention', 'filler'] as $table) {
             $this->connection->executeStatement('DROP TABLE IF EXISTS ' . $table);
         }
         $autoIncrement = $this->connection->getDatabasePlatform() instanceof PostgreSQLPlatform ? 'BIGSERIAL' : 'BIGINT AUTO_INCREMENT';
@@ -271,6 +272,62 @@ final class ConcurrentCatchUpTest extends TestCase
         self::assertGreaterThan(0, $problems, 'Without row locks, workers should have collided');
     }
 
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function subscriptionsWithADeadlockInTheirHandler(): iterable
+    {
+        yield 'first subscriber of an event' => ['s1'];
+        yield 'second subscriber of an event' => ['s2'];
+    }
+
+    #[Test]
+    #[DataProvider('subscriptionsWithADeadlockInTheirHandler')]
+    public function aDeadlockInAHandlerKeepsPositionsInLineWithTheHandledEvents(string $subscription): void
+    {
+        $this->prepareHandlerDeadlock();
+        $signals = $this->handlerDeadlockSignals();
+
+        $logs = $this->runWorkers([
+            ['name' => 'rival', 'mode' => 'deadlockRival'] + $signals,
+            ['name' => 'w1', 'mode' => 'active', 'limit' => 25, 'subscriptions' => ['s1', 's2'], 'deadlockAt' => ['subscription' => $subscription, 'position' => 10]] + $signals,
+        ]);
+
+        $context = json_encode($logs, JSON_THROW_ON_ERROR);
+        self::assertContains(DeadlockException::class, array_column($logs, 'handlerFailed'), 'This test requires the handler to be the deadlock victim: ' . $context);
+        $this->assertPositionsInLineWithHandledEvents(['s1', 's2'], $context);
+        self::assertSame(['status' => 'ACTIVE', 'position' => 0, 'rows' => 0], $this->subscriptionState($subscription), 'A deadlock is temporary, the subscription should not go to ERROR: ' . $context);
+    }
+
+    #[Test]
+    public function aWorkerThatKeepsGoingAfterADeadlockInAHandlerHandlesEachEventExactlyOnce(): void
+    {
+        $this->prepareHandlerDeadlock();
+        $signals = $this->handlerDeadlockSignals();
+
+        $logs = $this->runWorkers([
+            ['name' => 'rival', 'mode' => 'deadlockRival'] + $signals,
+            ['name' => 'k1', 'mode' => 'keepGoing', 'limit' => 25, 'subscriptions' => ['s1', 's2'], 'useStop' => true, 'deadlockAt' => ['subscription' => 's1', 'position' => 10]] + $signals,
+            ['name' => 'writer', 'mode' => 'writer', 'count' => 100, 'sleepUs' => 10000],
+        ]);
+
+        $context = json_encode($logs, JSON_THROW_ON_ERROR);
+        self::assertContains(DeadlockException::class, array_column($logs, 'handlerFailed'), 'This test requires the handler to be the deadlock victim: ' . $context);
+        $this->assertEachEventHandledExactlyOnce(['s1', 's2'], 160);
+    }
+
+    #[Test]
+    public function anSqlErrorInAHandlerKeepsPositionsInLineWithTheHandledEvents(): void
+    {
+        $this->prepareActiveSubscriptions(['s1', 's2'], 60);
+
+        $logs = $this->runWorkers([
+            ['name' => 'w1', 'mode' => 'active', 'limit' => 25, 'subscriptions' => ['s1', 's2'], 'sqlErrorAt' => ['subscription' => 's1', 'position' => 10]],
+        ]);
+
+        $this->assertPositionsInLineWithHandledEvents(['s1', 's2'], json_encode($logs, JSON_THROW_ON_ERROR));
+    }
+
     #[Test]
     public function transactionsCanBeNested(): void
     {
@@ -443,6 +500,38 @@ final class ConcurrentCatchUpTest extends TestCase
     {
         foreach ($subscriptions as $id) {
             self::assertSame(['status' => 'ACTIVE', 'position' => $numberOfEvents, 'rows' => $numberOfEvents], $this->subscriptionState($id), "Subscription $id");
+        }
+    }
+
+    private function prepareHandlerDeadlock(): void
+    {
+        if (!$this->connection->getDatabasePlatform() instanceof AbstractMySQLPlatform) {
+            self::markTestSkipped('InnoDB rolls back the whole transaction of a deadlock victim, PostgreSQL keeps it open until the rollback');
+        }
+        $this->connection->executeStatement('CREATE TABLE contention (id INT PRIMARY KEY, value INT NOT NULL)');
+        $this->connection->executeStatement('CREATE TABLE filler (value INT NOT NULL)');
+        $this->connection->executeStatement('INSERT INTO contention (id, value) VALUES (1, 0), (2, 0)');
+        $this->prepareActiveSubscriptions(['s1', 's2'], 60);
+    }
+
+    /**
+     * @return array{rivalHolds: string, handlerHolds: string}
+     */
+    private function handlerDeadlockSignals(): array
+    {
+        return ['rivalHolds' => $this->runDirectory . '/rival-holds', 'handlerHolds' => $this->runDirectory . '/handler-holds'];
+    }
+
+    /**
+     * A position promises that all events up to it have been handled, no matter how a run ended
+     *
+     * @param array<string> $subscriptions
+     */
+    private function assertPositionsInLineWithHandledEvents(array $subscriptions, string $context): void
+    {
+        foreach ($subscriptions as $id) {
+            $state = $this->subscriptionState($id);
+            self::assertSame($state['position'], $state['rows'], "Subscription $id: " . json_encode($state, JSON_THROW_ON_ERROR) . ' ' . $context);
         }
     }
 

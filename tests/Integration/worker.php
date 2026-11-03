@@ -56,11 +56,54 @@ if ($connection->getDatabasePlatform() instanceof AbstractMySQLPlatform) {
     $connection->executeStatement('SET SESSION innodb_lock_wait_timeout = 5');
 }
 
+$waitFor = static function (string $file): void {
+    $deadline = microtime(true) + 20;
+    while (!file_exists($file)) {
+        if (microtime(true) > $deadline) {
+            throw new RuntimeException('Timeout waiting for ' . $file);
+        }
+        usleep(1000);
+    }
+};
+
+if ($config['mode'] === 'deadlockRival') {
+    // holds the lock the handler needs next and waits for the lock the handler holds. The many written rows make the handler the cheaper deadlock victim
+    try {
+        $connection->beginTransaction();
+        for ($i = 0; $i < 300; $i++) {
+            $connection->insert('filler', ['value' => $i]);
+        }
+        $connection->executeStatement('UPDATE contention SET value = value + 1 WHERE id = 2');
+        touch($config['rivalHolds']);
+        $waitFor($config['handlerHolds']);
+        $connection->executeStatement('UPDATE contention SET value = value + 1 WHERE id = 1');
+        $connection->commit();
+    } catch (Throwable $e) {
+        $write(['rivalFailed' => $e::class]);
+    }
+    exit(0);
+}
+
 $handlerCalls = 0;
 $subscribers = [];
 foreach ($config['subscriptions'] as $id) {
-    $subscribers[] = Subscriber::create($id, static function (TestEvent $event) use ($id, $connection, $config, &$handlerCalls): void {
+    $subscribers[] = Subscriber::create($id, static function (TestEvent $event) use ($id, $connection, $config, $waitFor, $write, &$handlerCalls): void {
         $handlerCalls++;
+        if (($config['deadlockAt']['subscription'] ?? null) === $id && $config['deadlockAt']['position'] === $event->position->value) {
+            $connection->executeStatement('UPDATE contention SET value = value + 1 WHERE id = 1');
+            touch($config['handlerHolds']);
+            $waitFor($config['rivalHolds']);
+            usleep(500000);
+            try {
+                $connection->executeStatement('UPDATE contention SET value = value + 1 WHERE id = 2');
+            } catch (Throwable $e) {
+                $write(['handlerFailed' => $e::class]);
+                throw $e;
+            }
+        }
+        if (($config['sqlErrorAt']['subscription'] ?? null) === $id && $config['sqlErrorAt']['position'] === $event->position->value) {
+            $connection->executeQuery('SELECT * FROM table_that_does_not_exist');
+        }
         if (($config['killAtHandlerCall'] ?? null) === $handlerCalls) {
             posix_kill(getmypid(), 9);
             sleep(5);
@@ -115,6 +158,11 @@ if ($config['mode'] === 'keepGoing') {
         }
         usleep(2000);
     }
+    do {
+        $catchUp('boot');
+        $result = $catchUp('active');
+        $processed += $result->numberOfProcessedEvents;
+    } while ($result->hasPendingEvents);
     $write(['processed' => $processed, 'caught' => $caught, 'keepGoing' => true]);
     exit(0);
 }
