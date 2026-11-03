@@ -35,6 +35,11 @@ final readonly class StoreWithRepeatableRead implements SubscriptionStore
         return $this->store->findByCriteriaForUpdate($criteria);
     }
 
+    public function claimNext(SubscriptionCriteria $criteria): Subscription|null
+    {
+        return $this->store->claimNext($criteria);
+    }
+
     public function add(Subscription $subscription): void
     {
         $this->store->add($subscription);

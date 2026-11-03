@@ -174,21 +174,102 @@ final class ConcurrentCatchUpTest extends TestCase
 
         $this->assertNoFailures($logs);
         $this->assertEachEventHandledExactlyOnce($subscriptions, 300);
-        $batches = self::batchesInOrder($logs);
-        $overlap = 0.0;
-        $total = 0.0;
-        foreach ($batches as $a) {
-            if ($a['worker'] !== 'w1') {
-                continue;
-            }
-            $total += $a['finished'] - $a['started'];
-            foreach ($batches as $b) {
-                if ($b['worker'] === 'w2') {
-                    $overlap += max(0, min($a['finished'], $b['finished']) - max($a['started'], $b['started']));
-                }
-            }
+        self::assertGreaterThan(0.5, self::shareOfW1OverlappingW2($logs));
+    }
+
+    #[Test]
+    public function claimingWorkersHandleEachEventExactlyOnce(): void
+    {
+        $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 400);
+        $worker = ['mode' => 'activeNext', 'limit' => 40, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sleepUs' => 200];
+
+        $logs = $this->runWorkers([['name' => 'w1'] + $worker, ['name' => 'w2'] + $worker, ['name' => 'w3'] + $worker, ['name' => 'w4'] + $worker]);
+
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce(self::ALL_SUBSCRIPTIONS, 400);
+        self::assertSame(1200, array_sum(array_column($logs, 'processed')));
+        self::assertLessThanOrEqual(40, max(array_column($logs, 'processed')));
+    }
+
+    #[Test]
+    public function claimingWorkersRunInParallelWithTheSameCriteria(): void
+    {
+        $subscriptions = ['s1', 's2'];
+        $this->prepareActiveSubscriptions($subscriptions, 300);
+        $worker = ['mode' => 'activeNext', 'limit' => 25, 'subscriptions' => $subscriptions, 'sleepUs' => 500];
+
+        $logs = $this->runWorkers([['name' => 'w1'] + $worker, ['name' => 'w2'] + $worker]);
+
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce($subscriptions, 300);
+        self::assertGreaterThan(0.5, self::shareOfW1OverlappingW2($logs));
+    }
+
+    #[Test]
+    public function claimingWorkersBootAndActivateEachSubscriptionOnce(): void
+    {
+        $this->prepareBootingSubscriptions(self::ALL_SUBSCRIPTIONS, 300);
+        $boot = ['mode' => 'bootNext', 'limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sleepUs' => 200];
+
+        $logs = $this->runWorkers([
+            ['name' => 'b1'] + $boot,
+            ['name' => 'b2'] + $boot,
+            ['name' => 'b3'] + $boot,
+            ['name' => 'a1', 'mode' => 'activeNext', 'limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'useStop' => true],
+            ['name' => 'writer', 'mode' => 'writer', 'count' => 60, 'sleepUs' => 5000, 'delayMs' => 50],
+        ]);
+
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce(self::ALL_SUBSCRIPTIONS, 360);
+        self::assertSame(3, array_sum(array_column($logs, 'activated')), 'SubscriptionActivated should fire once per subscription');
+    }
+
+    #[Test]
+    public function aClaimingWorkerKilledMidBatchLeavesNoTrace(): void
+    {
+        $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 400);
+        $worker = ['mode' => 'activeNext', 'limit' => 40, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sleepUs' => 200];
+
+        $logs = $this->runWorkers([['name' => 'w1', 'killAtHandlerCall' => 60] + $worker, ['name' => 'w2', 'useStop' => true] + $worker, ['name' => 'w3', 'useStop' => true] + $worker], allowedToBeKilled: 'w1');
+
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce(self::ALL_SUBSCRIPTIONS, 400);
+    }
+
+    #[Test]
+    public function claimingAndBlockingWorkersCanBeMixed(): void
+    {
+        $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 400);
+        $worker = ['limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sleepUs' => 100];
+
+        $logs = $this->runWorkers([
+            ['name' => 'c1', 'mode' => 'activeNext'] + $worker,
+            ['name' => 'c2', 'mode' => 'activeNext'] + $worker,
+            ['name' => 'b1', 'mode' => 'active'] + $worker,
+            ['name' => 'b2', 'mode' => 'active'] + $worker,
+        ]);
+
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce(self::ALL_SUBSCRIPTIONS, 400);
+    }
+
+    #[Test]
+    public function aSubscriptionWithARepeatingSqlErrorDoesNotStarveTheOthersOfASingleWorker(): void
+    {
+        $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 60);
+
+        $logs = $this->runWorkers([
+            ['name' => 'w1', 'mode' => 'activeNext', 'limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sqlErrorAt' => ['subscription' => 's1', 'position' => 10]],
+        ]);
+
+        self::assertSame([], array_values(array_filter(array_column($logs, 'fatal'))));
+        self::assertSame([], array_column($logs, 'outOfOrder'));
+        $this->assertEachEventHandledExactlyOnce(['s2', 's3'], 60);
+        $this->assertPositionsInLineWithHandledEvents(['s1'], json_encode($logs, JSON_THROW_ON_ERROR));
+        self::assertGreaterThan(0, array_sum(array_column($logs, 'errors')));
+        if ($this->connection->getDatabasePlatform() instanceof PostgreSQLPlatform) {
+            self::assertSame(['status' => 'ACTIVE', 'position' => 0, 'rows' => 0], $this->subscriptionState('s1'), 'An SQL error ends the transaction on PostgreSQL, so the subscription should stay retryable');
         }
-        self::assertGreaterThan($total * 0.5, $overlap);
     }
 
     #[Test]
@@ -490,6 +571,7 @@ final class ConcurrentCatchUpTest extends TestCase
     private function assertNoFailures(array $logs, int $expectedHandlerErrors = 0): void
     {
         self::assertSame([], array_values(array_filter(array_column($logs, 'fatal'))));
+        self::assertSame([], array_column($logs, 'outOfOrder'));
         self::assertSame($expectedHandlerErrors, array_sum(array_column($logs, 'errors')));
     }
 
@@ -547,6 +629,28 @@ final class ConcurrentCatchUpTest extends TestCase
             'position' => (int) $subscription['position'],
             'rows' => (int) $this->connection->fetchOne('SELECT COUNT(*) FROM projection WHERE subscription = ?', [$id]),
         ];
+    }
+
+    /**
+     * @param array<array<string, mixed>> $logs
+     */
+    private static function shareOfW1OverlappingW2(array $logs): float
+    {
+        $batches = self::batchesInOrder($logs);
+        $overlap = 0.0;
+        $total = 0.0;
+        foreach ($batches as $a) {
+            if ($a['worker'] !== 'w1') {
+                continue;
+            }
+            $total += $a['finished'] - $a['started'];
+            foreach ($batches as $b) {
+                if ($b['worker'] === 'w2') {
+                    $overlap += max(0, min($a['finished'], $b['finished']) - max($a['started'], $b['started']));
+                }
+            }
+        }
+        return $total > 0 ? $overlap / $total : 0.0;
     }
 
     /**

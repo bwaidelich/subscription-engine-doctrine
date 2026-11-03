@@ -33,6 +33,13 @@ final readonly class StoreWithoutRowLocks implements SubscriptionStore
         return $this->store->findByCriteria($criteria);
     }
 
+    public function claimNext(SubscriptionCriteria $criteria): Subscription|null
+    {
+        $subscriptions = iterator_to_array($this->store->findByCriteria($criteria), false);
+        usort($subscriptions, static fn(Subscription $a, Subscription $b) => [$a->position->value, $a->id->value] <=> [$b->position->value, $b->id->value]);
+        return $subscriptions[0] ?? null;
+    }
+
     public function add(Subscription $subscription): void
     {
         $this->store->add($subscription);

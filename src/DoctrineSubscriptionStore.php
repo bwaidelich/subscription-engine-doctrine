@@ -11,6 +11,8 @@ use Doctrine\DBAL\Exception as DbalException;
 use Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
+use Doctrine\DBAL\Query\ForUpdate\ConflictResolutionMode;
+use Doctrine\DBAL\Query\QueryBuilder;
 use Doctrine\DBAL\Schema\Column;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\DBAL\Schema\SchemaDiff;
@@ -71,15 +73,58 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         return $this->fetchByCriteria($criteria, true);
     }
 
+    /**
+     * Reads the order without locks, and then locks one row after the other by its primary key.
+     *
+     * A single query with ORDER BY position and LIMIT 1 doesn't work: MySQL and MariaDB lock every row they read before sorting, so it locks all matching rows.
+     * An index on (status, position) prevents that, but then blocking catch-ups deadlock on MySQL with every update of a position.
+     */
+    public function claimNext(SubscriptionCriteria $criteria): Subscription|null
+    {
+        $candidateIds = $this->queryBuilderForCriteria($criteria)
+            ->select('id')
+            ->from($this->tableName)
+            ->orderBy('position')
+            ->addOrderBy('id')
+            ->executeQuery()
+            ->fetchFirstColumn();
+        $skipLocks = !$this->dbal->getDatabasePlatform() instanceof SQLitePlatform;
+        foreach ($candidateIds as $candidateId) {
+            $queryBuilder = $this->queryBuilderForCriteria($criteria)
+                ->select('*')
+                ->from($this->tableName)
+                ->andWhere('id = :candidateId')
+                ->setParameter('candidateId', $candidateId);
+            if ($skipLocks) {
+                $queryBuilder->forUpdate(ConflictResolutionMode::SKIP_LOCKED);
+            }
+            $row = $queryBuilder->executeQuery()->fetchAssociative();
+            if ($row !== false) {
+                return self::fromDatabase($row);
+            }
+        }
+        return null;
+    }
+
     private function fetchByCriteria(SubscriptionCriteria $criteria, bool $forUpdate): Subscriptions
     {
-        $queryBuilder = $this->dbal->createQueryBuilder()
-            ->select('*')
+        $queryBuilder = $this->queryBuilderForCriteria($criteria)
             ->from($this->tableName)
             ->orderBy('id');
         if ($forUpdate && !$this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
             $queryBuilder->forUpdate();
         }
+        $rows = $queryBuilder->executeQuery()->fetchAllAssociative();
+        if ($rows === []) {
+            return Subscriptions::none();
+        }
+        return Subscriptions::fromArray(array_map(self::fromDatabase(...), $rows));
+    }
+
+    private function queryBuilderForCriteria(SubscriptionCriteria $criteria): QueryBuilder
+    {
+        $queryBuilder = $this->dbal->createQueryBuilder()
+            ->select('*');
         if ($criteria->ids !== null) {
             $queryBuilder->andWhere('id IN (:ids)')
                 ->setParameter(
@@ -96,11 +141,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
                     ArrayParameterType::STRING,
                 );
         }
-        $rows = $queryBuilder->executeQuery()->fetchAllAssociative();
-        if ($rows === []) {
-            return Subscriptions::none();
-        }
-        return Subscriptions::fromArray(array_map(self::fromDatabase(...), $rows));
+        return $queryBuilder;
     }
 
     public function add(Subscription $subscription): void

@@ -360,6 +360,27 @@ final class DoctrineSubscriptionStoreTest extends TestCase
     /**
      * What a database does with its deadlock victim: The transaction is gone, but DBAL does not know about it
      */
+    #[Test]
+    public function claimNextReturnsTheLowestPositionAndBreaksTiesById(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('c', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE)->with(position: Position::fromInteger(3)));
+        $this->store->add(Subscription::create('b', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE)->with(position: Position::fromInteger(3)));
+        $this->store->add(Subscription::create('a', RunMode::FROM_BEGINNING, SubscriptionStatus::ACTIVE)->with(position: Position::fromInteger(5)));
+        $this->store->add(Subscription::create('booting', RunMode::FROM_BEGINNING, SubscriptionStatus::BOOTING));
+
+        self::assertSame('b', $this->store->claimNext(SubscriptionCriteria::create(null, [SubscriptionStatus::ACTIVE]))?->id->value);
+    }
+
+    #[Test]
+    public function claimNextReturnsNullIfNoSubscriptionMatches(): void
+    {
+        $this->store->setup();
+        $this->store->add(Subscription::create('booting', RunMode::FROM_BEGINNING, SubscriptionStatus::BOOTING));
+
+        self::assertNull($this->store->claimNext(SubscriptionCriteria::create(null, [SubscriptionStatus::ACTIVE])));
+    }
+
     private function endTransactionInDatabase(): void
     {
         $native = $this->connection->getNativeConnection();
