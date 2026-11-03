@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception as DbalException;
+use Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
 use Doctrine\DBAL\Platforms\AbstractPlatform;
 use Doctrine\DBAL\Platforms\SQLitePlatform;
 use Doctrine\DBAL\Schema\Column;
@@ -127,10 +128,25 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 
     public function beginTransaction(): void
     {
-        if ($this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+        $platform = $this->dbal->getDatabasePlatform();
+        if ($platform instanceof SQLitePlatform) {
             $this->dbal->executeStatement('BEGIN EXCLUSIVE');
+            return;
+        }
+        if ($platform instanceof AbstractMySQLPlatform && !$this->dbal->isTransactionActive()) {
+            // With REPEATABLE READ, SELECT ... FOR UPDATE takes next-key locks on the status index. Changing the status of a subscription
+            // then deadlocks with workers that are waiting for the lock. This statement only applies to the next transaction.
+            $this->dbal->executeStatement('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
+        }
+        $this->dbal->beginTransaction();
+    }
+
+    public function rollback(): void
+    {
+        if ($this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+            $this->dbal->executeStatement('ROLLBACK');
         } else {
-            $this->dbal->beginTransaction();
+            $this->dbal->rollBack();
         }
     }
 
