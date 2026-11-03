@@ -141,3 +141,45 @@ jobs:
 
       - name: Run tests
         run: composer run-script test:phpunit
+
+  integration-tests:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: 'mysql'
+            start: 'docker run -d -e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=test -p 127.0.0.1:3306:3306 mysql:8.4'
+            dsn: 'pdo-mysql://root:test@127.0.0.1:3306/test'
+          - database: 'mariadb'
+            start: 'docker run -d -e MARIADB_ROOT_PASSWORD=test -e MARIADB_DATABASE=test -p 127.0.0.1:3306:3306 mariadb:11.4'
+            dsn: 'pdo-mysql://root:test@127.0.0.1:3306/test'
+          - database: 'postgres'
+            start: 'docker run -d -e POSTGRES_PASSWORD=test -e POSTGRES_DB=test -p 127.0.0.1:5432:5432 postgres:17'
+            dsn: 'pdo-pgsql://postgres:test@127.0.0.1:5432/test'
+
+    steps:
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, pdo_pgsql, posix
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start database
+        run: ${{ matrix.start }}
+
+      # The integration tests rely on limit and rollback, drop this once subscription engine 2.0 is released
+      - name: Require subscription engine 2.x
+        run: composer require --no-update wwwision/subscription-engine:2.x-dev
+
+      - name: Install highest dependencies
+        run: composer update --prefer-dist --no-progress
+
+      - name: Run tests
+        run: composer run-script test:phpunit
+        env:
+          TEST_DATABASE_DSN: ${{ matrix.dsn }}
