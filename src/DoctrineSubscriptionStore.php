@@ -37,6 +37,11 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
 {
     private readonly ClockInterface $clock;
 
+    /**
+     * Number of transactions of this store that have not ended yet. DBAL can't tell after losing the connection, it starts over without a transaction
+     */
+    private int $openTransactions = 0;
+
     public function __construct(
         private readonly Connection $dbal,
         private readonly string $tableName,
@@ -173,9 +178,15 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
     /**
      * MySQL and MariaDB roll back the whole transaction of a deadlock victim, without DBAL knowing about it.
      * Everything written after that would be committed right away, so a position could be persisted without the events it stands for.
+     *
+     * The same happens if a statement reports a lost connection: DBAL closes the connection on its own, and the next statement reconnects without a transaction.
      */
     private function assertTransactionIsIntact(): void
     {
+        // On SQLite the store manages its transaction with own statements, so DBAL doesn't know about it. There is also no connection to lose
+        if ($this->openTransactions > 0 && !$this->dbal->isTransactionActive() && !$this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
+            throw new RuntimeException('The connection to the database was lost during the transaction of the subscription store. All changes of this catch-up have been discarded', 1793750402);
+        }
         if (!$this->dbal->isTransactionActive()) {
             return;
         }
@@ -194,6 +205,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         $platform = $this->dbal->getDatabasePlatform();
         if ($platform instanceof SQLitePlatform) {
             $this->dbal->executeStatement('BEGIN EXCLUSIVE');
+            $this->openTransactions++;
             return;
         }
         if ($platform instanceof AbstractMySQLPlatform && !$this->dbal->isTransactionActive()) {
@@ -202,10 +214,13 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
             $this->dbal->executeStatement('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
         }
         $this->dbal->beginTransaction();
+        $this->openTransactions++;
     }
 
     public function rollback(): void
     {
+        // Also if this fails: Usually the connection is gone, and the transaction with it
+        $this->openTransactions = max(0, $this->openTransactions - 1);
         if ($this->dbal->getDatabasePlatform() instanceof SQLitePlatform) {
             $this->dbal->executeStatement('ROLLBACK');
         } else {
@@ -220,6 +235,7 @@ final class DoctrineSubscriptionStore implements SubscriptionStore
         } else {
             $this->dbal->commit();
         }
+        $this->openTransactions = max(0, $this->openTransactions - 1);
     }
 
     /**
