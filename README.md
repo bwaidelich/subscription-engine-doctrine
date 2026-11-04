@@ -10,6 +10,8 @@ Subscriber handlers that share the connection run in the same transaction.
 
 MySQL and MariaDB roll back the whole transaction of a deadlock victim. If that happens inside a subscriber handler, `add()` and `update()` throw an exception instead of writing outside of the transaction, and the engine repeats the batch on the next catch-up. This relies on `PDO::inTransaction()`, so it requires a PDO driver: With `mysqli` it is not detected.
 
+DBAL closes a connection on its own if a statement reports that it is lost, and the next statement reconnects without a transaction. `add()` and `update()` throw an exception in that case as well, with any driver. Call `close()` on the connection if the exception doesn't come from DBAL recognizing the lost connection: The next statement then reconnects.
+
 ## Claims
 
 `claimNext()` requires MySQL 8.0, MariaDB 10.6 or PostgreSQL. On older versions of MySQL and MariaDB, DBAL throws a `NotSupported` exception instead of silently waiting for locks. `catchUpActive()` and `boot()` keep working.
