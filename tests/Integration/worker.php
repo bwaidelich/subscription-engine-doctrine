@@ -6,7 +6,9 @@ namespace Wwwision\SubscriptionEngineDoctrine\Tests\Integration;
 
 use Doctrine\DBAL\Configuration;
 use Doctrine\DBAL\DriverManager;
+use Doctrine\DBAL\Exception\DeadlockException;
 use Doctrine\DBAL\Platforms\AbstractMySQLPlatform;
+use Doctrine\DBAL\Platforms\PostgreSQLPlatform;
 use Doctrine\DBAL\Schema\DefaultSchemaManagerFactory;
 use Doctrine\DBAL\Tools\DsnParser;
 use RuntimeException;
@@ -117,6 +119,12 @@ foreach ($config['subscriptions'] as $id) {
         }
         $connection->insert('projection', ['subscription' => $id, 'position' => $event->position->value, 'worker' => $config['name']]);
         usleep($config['sleepUs'] ?? 0);
+    }, reset: static function () use ($id, $connection, $config): void {
+        // the table is shared, and all subscriptions are fenced before the first handler runs
+        if ($id === $config['subscriptions'][0]) {
+            $connection->executeStatement($connection->getDatabasePlatform() instanceof PostgreSQLPlatform ? 'TRUNCATE projection' : 'TRUNCATE TABLE projection');
+        }
+        usleep($config['resetHandlerSleepUs'] ?? 0);
     });
 }
 $store = new DoctrineSubscriptionStore($connection, 'subscriptions');
@@ -154,14 +162,37 @@ $catchUp = static function (string $mode) use ($engine, $config) {
     };
 };
 
+if ($config['mode'] === 'resetter') {
+    for ($i = 0; $i < $config['count']; $i++) {
+        do {
+            $deadlock = false;
+            try {
+                $result = $engine->reset();
+                $write(['resetFailed' => $result->errors?->getClampedMessage()]);
+            } catch (DeadlockException) {
+                // the fence has changed nothing, so it can be repeated
+                $deadlock = true;
+                $write(['fenceDeadlock' => true]);
+            } catch (Throwable $e) {
+                $write(['resetFailed' => $e::class . ': ' . $e->getMessage()]);
+            }
+        } while ($deadlock);
+        usleep($config['pauseUs']);
+    }
+    exit(0);
+}
+
 if ($config['mode'] === 'keepGoing') {
     // a long-running worker: log every exception and carry on with the same engine and connection
     $processed = 0;
     $caught = [];
+    $errors = 0;
     while (!file_exists($config['stop'])) {
-        foreach (['boot', 'active'] as $mode) {
+        foreach ($config['catchUpModes'] ?? ['boot', 'active'] as $mode) {
             try {
-                $processed += $catchUp($mode)->numberOfProcessedEvents;
+                $result = $catchUp($mode);
+                $processed += $result->numberOfProcessedEvents;
+                $errors += $result->errors?->count() ?? 0;
             } catch (Throwable $e) {
                 $caught[$e::class] = ($caught[$e::class] ?? 0) + 1;
             }
@@ -169,11 +200,11 @@ if ($config['mode'] === 'keepGoing') {
         usleep(2000);
     }
     do {
-        $catchUp('boot');
+        $bootResult = $catchUp('boot');
         $result = $catchUp('active');
-        $processed += $result->numberOfProcessedEvents;
-    } while ($result->hasPendingEvents);
-    $write(['processed' => $processed, 'caught' => $caught, 'keepGoing' => true]);
+        $processed += $bootResult->numberOfProcessedEvents + $result->numberOfProcessedEvents;
+    } while ($bootResult->hasPendingEvents || $result->hasPendingEvents);
+    $write(['processed' => $processed, 'caught' => $caught, 'errors' => $errors, 'keepGoing' => true]);
     exit(0);
 }
 

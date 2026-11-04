@@ -342,6 +342,29 @@ final class ConcurrentCatchUpTest extends TestCase
     }
 
     #[Test]
+    public function resetWhileClaimingAndBlockingWorkersKeepRunningHandlesEachEventExactlyOnce(): void
+    {
+        $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 200);
+        $worker = ['subscriptions' => self::ALL_SUBSCRIPTIONS, 'mode' => 'keepGoing', 'useStop' => true, 'limit' => 20, 'sleepUs' => 200];
+        $claiming = ['catchUpModes' => ['bootNext', 'activeNext']];
+
+        $logs = $this->runWorkers([
+            ['name' => 'c1'] + $claiming + $worker,
+            ['name' => 'c2'] + $claiming + $worker,
+            ['name' => 'b1'] + $worker,
+            ['name' => 'resetter', 'mode' => 'resetter', 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'count' => 4, 'pauseUs' => 150000, 'resetHandlerSleepUs' => 100000],
+            ['name' => 'writer', 'mode' => 'writer', 'subscriptions' => [], 'count' => 100, 'sleepUs' => 5000],
+        ]);
+
+        self::assertSame([], array_values(array_filter(array_column($logs, 'resetFailed'))));
+        self::assertCount(4, array_filter($logs, static fn(array $log) => array_key_exists('resetFailed', $log)));
+        // a blocking worker can deadlock with the fence on MySQL and MariaDB, which rolls back its run and is safe to repeat
+        self::assertSame([], array_diff(array_keys(array_merge(...array_column($logs, 'caught'))), [DeadlockException::class]));
+        $this->assertNoFailures($logs);
+        $this->assertEachEventHandledExactlyOnce(self::ALL_SUBSCRIPTIONS, 300);
+    }
+
+    #[Test]
     public function negativeControlDetectsDoubleHandlingWithoutRowLocks(): void
     {
         $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 200);
