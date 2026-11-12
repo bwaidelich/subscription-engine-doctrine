@@ -15,6 +15,7 @@ use RuntimeException;
 use Throwable;
 use Wwwision\SubscriptionEngine\Engine\EngineEvent\CatchUpFinished;
 use Wwwision\SubscriptionEngine\Engine\EngineEvent\CatchUpInitiated;
+use Wwwision\SubscriptionEngine\Engine\EngineEvent\CatchUpRunFailed;
 use Wwwision\SubscriptionEngine\Engine\EngineEvent\CatchUpStarted;
 use Wwwision\SubscriptionEngine\Engine\EngineEvent\EngineEvent;
 use Wwwision\SubscriptionEngine\Engine\EngineEvent\SubscriberHandledEvent;
@@ -152,8 +153,21 @@ $engine->onEngineEvent(static function (EngineEvent $event) use (&$run, &$failur
     }
 });
 
-$catchUp = static function (string $mode) use ($engine, $config) {
+// like a caller with a retry policy: subscriptions whose run failed are left out of the next claims
+$leftOut = [];
+if ($config['leaveOutFailed'] ?? false) {
+    $engine->onEngineEvent(static function (EngineEvent $event) use (&$leftOut): void {
+        if ($event instanceof CatchUpRunFailed) {
+            $leftOut[] = $event->subscription->id->value;
+        }
+    });
+}
+
+$catchUp = static function (string $mode) use ($engine, $config, &$leftOut) {
     $criteria = isset($config['ids']) ? SubscriptionEngineCriteria::create($config['ids']) : null;
+    if ($leftOut !== []) {
+        $criteria = SubscriptionEngineCriteria::create(array_values(array_diff($config['ids'] ?? $config['subscriptions'], $leftOut)));
+    }
     return match ($mode) {
         'boot' => $engine->boot($criteria, $config['limit']),
         'bootNext' => $engine->bootNext($criteria, $config['limit']),
