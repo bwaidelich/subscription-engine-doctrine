@@ -254,12 +254,12 @@ final class ConcurrentCatchUpTest extends TestCase
     }
 
     #[Test]
-    public function aSubscriptionWithARepeatingSqlErrorDoesNotStarveTheOthersOfASingleWorker(): void
+    public function aSubscriptionWithARepeatingSqlErrorDoesNotStarveTheOthersIfTheWorkerLeavesItOut(): void
     {
         $this->prepareActiveSubscriptions(self::ALL_SUBSCRIPTIONS, 60);
 
         $logs = $this->runWorkers([
-            ['name' => 'w1', 'mode' => 'activeNext', 'limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'sqlErrorAt' => ['subscription' => 's1', 'position' => 10]],
+            ['name' => 'w1', 'mode' => 'activeNext', 'limit' => 25, 'subscriptions' => self::ALL_SUBSCRIPTIONS, 'leaveOutFailed' => true, 'sqlErrorAt' => ['subscription' => 's1', 'position' => 10]],
         ]);
 
         self::assertSame([], array_values(array_filter(array_column($logs, 'fatal'))));
