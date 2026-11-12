@@ -1,7 +1,7 @@
 {
     "name": "wwwision/subscription-engine-doctrine",
     "description": "Doctrine adapters for the wwwision/subscription-engine",
-    "type": "package",
+    "type": "library",
     "license": "MIT",
     "authors": [
         {
