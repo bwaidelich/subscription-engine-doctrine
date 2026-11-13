@@ -62,10 +62,10 @@ jobs:
           - '8.3'
         dependencies:
           - 'highest'
-        # 2.x-dev can be dropped once subscription engine 2.0 is released, as highest then installs it
+        # highest would only install 2.x, the constraint allows 1.x as well
         subscription-engine:
           - '^1'
-          - '2.x-dev'
+          - '^2'
 
     steps:
       - name: Setup PHP
@@ -115,10 +115,10 @@ jobs:
           - '8.5'
         dependencies:
           - 'highest'
-        # 2.x-dev can be dropped once subscription engine 2.0 is released, as highest then installs it
+        # highest would only install 2.x, the constraint allows 1.x as well
         subscription-engine:
           - '^1'
-          - '2.x-dev'
+          - '^2'
 
     steps:
       - name: Setup PHP
@@ -191,9 +191,9 @@ jobs:
       - name: Start database
         run: ${{ matrix.start }}
 
-      # The integration tests rely on limit and rollback, drop this once subscription engine 2.0 is released
+      # The integration tests rely on limit, rollback and filtered reads of 2.x, also with lowest dependencies
       - name: Require subscription engine 2.x
-        run: composer require --no-update wwwision/subscription-engine:2.x-dev
+        run: composer require --no-update wwwision/subscription-engine:^2
 
       - name: Install dependencies
         run: composer update --prefer-dist --no-progress ${{ matrix.composer-flags }}
