@@ -51,7 +51,5 @@
             "@test:cs",
             "@test:phpunit"
         ]
-    },
-    "minimum-stability": "dev",
-    "prefer-stable": true
+    }
 }
