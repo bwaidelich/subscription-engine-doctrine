@@ -113,6 +113,7 @@ jobs:
           - '8.3'
           - '8.4'
           - '8.5'
+          - '8.6'
         dependencies:
           - 'highest'
         # highest would only install 2.x, the constraint allows 1.x as well
